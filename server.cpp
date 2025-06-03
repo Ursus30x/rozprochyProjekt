@@ -160,6 +160,7 @@ private:
         players[player_id].tcp_socket = socket;
         players[player_id].udp_socket = udp_socket;
         players[player_id].udp_addr = addr;
+        players[player_id].udp_addr.sin_port = htons(ntohs(addr.sin_port) + 1);
         players[player_id].nick = std::string(join_packet.nick, join_packet.nick_length);
         players[player_id].connected = true;
         
@@ -278,7 +279,7 @@ private:
         
         while (running) {
             int bytes = recvfrom(udp_socket, buffer, sizeof(buffer), MSG_DONTWAIT, 
-                               (sockaddr*)&client_addr, &addr_len);
+                            (sockaddr*)&client_addr, &addr_len);
             
             if (bytes <= 0) {
                 std::this_thread::sleep_for(std::chrono::milliseconds(1));
@@ -292,18 +293,23 @@ private:
             
             PlayerActionPacket* action_packet = (PlayerActionPacket*)(buffer + 1);
             
-            // Znajdź gracza po adresie
+            // POPRAWKA: Znajdź gracza po adresie IP (port może się różnić)
             int player_id = -1;
             for (int i = 0; i < 4; i++) {
                 if (players[i].connected && 
-                    players[i].udp_addr.sin_addr.s_addr == client_addr.sin_addr.s_addr &&
-                    players[i].udp_addr.sin_port == client_addr.sin_port) {
+                    players[i].udp_addr.sin_addr.s_addr == client_addr.sin_addr.s_addr) {
                     player_id = i;
+                    // Zaktualizuj port UDP gracza na aktualny
+                    players[i].udp_addr.sin_port = client_addr.sin_port;
                     break;
                 }
             }
             
-            if (player_id == -1) continue;
+            if (player_id == -1) {
+                std::cout << "Nie znaleziono gracza dla adresu UDP\n";
+                continue;
+            }
+        
             
             // Dodaj akcję do kolejki
             ActionEvent event;
@@ -357,19 +363,29 @@ private:
                     action_queue.pop();
                     
                     if (game_state.game_running) {
+                        // POPRAWKA: Dodaj logowanie akcji
+                        std::cout << "Przetwarzanie akcji gracza " << event.player_id 
+                                << ": " << (int)event.action << std::endl;
                         game_state.paddles[event.player_id].set_action(event.action);
                     }
                 }
             }
             
-            // Aktualizuj stan gry
-            {
+            // POPRAWKA: Aktualizuj stan gry TYLKO gdy gra jest aktywna
+            if (game_state.game_running) {
                 std::lock_guard<std::mutex> lock(game_mutex);
                 game_state.update(dt);
+                
+                // POPRAWKA: Loguj pozycję kulki co jakiś czas
+                static int log_counter = 0;
+                if (++log_counter % 60 == 0) { // co sekundę przy 60 FPS
+                    std::cout << "Ball position: x=" << game_state.ball.x 
+                            << ", y=" << game_state.ball.y << std::endl;
+                }
             }
             
-            // Synchronizacja co 100ms
-            if (std::chrono::duration<float>(current_time - last_sync).count() > 0.1f) {
+            // POPRAWKA: Synchronizacja co 50ms zamiast 100ms (częściej)
+            if (std::chrono::duration<float>(current_time - last_sync).count() > 0.05f) {
                 sync_game_state();
                 last_sync = current_time;
             }
@@ -384,29 +400,39 @@ private:
     }
     
     void sync_game_state() {
-        if (!game_state.game_running) return;
-        
-        char buffer[sizeof(uint8_t) + sizeof(GameSyncPacket)];
-        buffer[0] = PACKET_GAME_SYNC;
-        
-        GameSyncPacket* sync_packet = (GameSyncPacket*)(buffer + 1);
-        sync_packet->ball_x = game_state.ball.x;
-        sync_packet->ball_y = game_state.ball.y;
-        sync_packet->ball_velocity_x = game_state.ball.velocity_x;
-        sync_packet->ball_velocity_y = game_state.ball.velocity_y;
-        
-        for (int i = 0; i < 4; i++) {
-            sync_packet->paddle_positions[i] = game_state.paddles[i].position;
-            sync_packet->scores[i] = game_state.scores[i];
-        }
-        
-        for (int i = 0; i < 4; i++) {
-            if (players[i].connected) {
-                sendto(udp_socket, buffer, sizeof(buffer), 0,
-                       (sockaddr*)&players[i].udp_addr, sizeof(players[i].udp_addr));
+    if (!game_state.game_running) return;
+    
+    char buffer[sizeof(uint8_t) + sizeof(GameSyncPacket)];
+    buffer[0] = PACKET_GAME_SYNC;
+    
+    GameSyncPacket* sync_packet = (GameSyncPacket*)(buffer + 1);
+    sync_packet->ball_x = game_state.ball.x;
+    sync_packet->ball_y = game_state.ball.y;
+    sync_packet->ball_velocity_x = game_state.ball.velocity_x;
+    sync_packet->ball_velocity_y = game_state.ball.velocity_y;
+    
+    for (int i = 0; i < 4; i++) {
+        sync_packet->paddle_positions[i] = game_state.paddles[i].position;
+        sync_packet->scores[i] = game_state.scores[i];
+    }
+    
+    int sent_count = 0;
+    for (int i = 0; i < 4; i++) {
+        if (players[i].connected) {
+            int result = sendto(udp_socket, buffer, sizeof(buffer), 0,
+                               (sockaddr*)&players[i].udp_addr, sizeof(players[i].udp_addr));
+            if (result > 0) {
+                sent_count++;
+            } else {
+                std::cout << "Błąd wysyłania sync do gracza " << i << ": " << strerror(errno) << std::endl;
             }
         }
     }
+    
+    if (sent_count > 0) {
+        std::cout << "Wysłano sync do " << sent_count << " graczy" << std::endl;
+    }
+}
 };
 
 int main(int argc, char* argv[]) {

@@ -297,7 +297,7 @@ private:
     void reset_ball() {
         ball.x = ARENA_SIZE / 2;
         ball.y = ARENA_SIZE / 2;
-        ball.velocity_x = (rand() % 2 == 0 ? 1 : -1) * BALL_SPEED;
+        ball.velocity_x =  0 ;//(rand() % 2 == 0 ? 1 : -1) * BALL_SPEED;
         ball.velocity_y = (rand() % 2 == 0 ? 1 : -1) * BALL_SPEED;
     }
     

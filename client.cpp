@@ -8,7 +8,19 @@
 #include <arpa/inet.h>
 #include <unistd.h>
 #include <cstring>
+#include <iostream>
+#include <fstream>
+#include <string>
 #include <ncurses.h>
+
+void logToFile(const std::string& message) {
+    std::ofstream logFile("log_client.txt", std::ios::app); // tryb dopisywania (append)
+    if (logFile.is_open()) {
+        logFile << "[LOG]" << message << std::endl;
+    } else {
+        std::cerr << "Nie można otworzyć pliku log.txt!" << std::endl;
+    }
+}
 
 class GameClient {
 private:
@@ -31,6 +43,7 @@ public:
         disconnect();
     }
     
+      
     bool connect_to_server(const std::string& ip, int port) {
         // Tworzenie socketów
         tcp_socket = socket(AF_INET, SOCK_STREAM, 0);
@@ -52,9 +65,23 @@ public:
             return false;
         }
         
+        // POPRAWKA: Bind UDP socket do dowolnego portu
+        sockaddr_in local_addr{};
+        local_addr.sin_family = AF_INET;
+        local_addr.sin_addr.s_addr = INADDR_ANY;
+        local_addr.sin_port = 0; // System wybierze wolny port
+        
+        if (bind(udp_socket, (sockaddr*)&local_addr, sizeof(local_addr)) < 0) {
+            std::cerr << "Błąd bind UDP socket\n";
+            close(tcp_socket);
+            close(udp_socket);
+            return false;
+        }
+        
         connected = true;
         return true;
     }
+    
     
     bool join_lobby(const std::string& nick) {
         if (!connected) return false;
@@ -152,6 +179,8 @@ private:
                     handle_player_left();
                     break;
             }
+
+            logToFile("dostal pakiet");
         }
     }
     
@@ -165,14 +194,36 @@ private:
         
         if (bytes <= 0) return;
         
+        // POPRAWKA: Dodaj więcej logowania
+        logToFile("Otrzymano wiadomość UDP, rozmiar: " + std::to_string(bytes));
+        
+        if (bytes < sizeof(uint8_t)) {
+            logToFile("Za mała wiadomość UDP");
+            return;
+        }
+        
         uint8_t packet_type = buffer[0];
+        logToFile("Typ pakietu UDP: " + std::to_string((int)packet_type));
         
         switch (packet_type) {
             case PACKET_ACTION_PROPAGATION:
-                handle_action_propagation((ActionPropagationPacket*)(buffer + 1));
+                if (bytes >= sizeof(uint8_t) + sizeof(ActionPropagationPacket)) {
+                    handle_action_propagation((ActionPropagationPacket*)(buffer + 1));
+                    logToFile("Obsłużono propagację akcji");
+                } else {
+                    logToFile("Za mały pakiet dla propagacji akcji");
+                }
                 break;
             case PACKET_GAME_SYNC:
-                handle_game_sync((GameSyncPacket*)(buffer + 1));
+                if (bytes >= sizeof(uint8_t) + sizeof(GameSyncPacket)) {
+                    logToFile("Handluje game sync");
+                    handle_game_sync((GameSyncPacket*)(buffer + 1));
+                } else {
+                    logToFile("Za mały pakiet dla game sync");
+                }
+                break;
+            default:
+                logToFile("Nieznany typ pakietu UDP: " + std::to_string((int)packet_type));
                 break;
         }
     }
@@ -204,6 +255,7 @@ private:
     void handle_game_sync(GameSyncPacket* packet) {
         std::lock_guard<std::mutex> lock(state_mutex);
         
+        logToFile("pozycja pilki:" + std::to_string(packet->ball_x) + " " + std::to_string(packet->ball_y));
         game_state.ball.x = packet->ball_x;
         game_state.ball.y = packet->ball_y;
         game_state.ball.velocity_x = packet->ball_velocity_x;
@@ -244,8 +296,17 @@ private:
         PlayerActionPacket* packet = (PlayerActionPacket*)(buffer + 1);
         packet->action = action;
         
-        sendto(udp_socket, buffer, sizeof(buffer), 0,
-               (sockaddr*)&server_addr, sizeof(server_addr));
+        // POPRAWKA: Dodaj logowanie do debugowania
+        std::cout << "Wysyłanie akcji: " << (int)action << std::endl;
+        logToFile("Wysyłanie akcji UDP: " + std::to_string((int)action));
+        
+        int result = sendto(udp_socket, buffer, sizeof(buffer), 0,
+                           (sockaddr*)&server_addr, sizeof(server_addr));
+        
+        if (result < 0) {
+            std::cerr << "Błąd wysyłania UDP: " << strerror(errno) << std::endl;
+            logToFile("Błąd wysyłania UDP: " + std::string(strerror(errno)));
+        }
     }
     
     void input_loop() {
